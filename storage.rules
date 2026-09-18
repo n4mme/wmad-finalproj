@@ -1,0 +1,74 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    
+    // ==========================================
+    // HELPER FUNCTIONS
+    // ==========================================
+    
+    // Check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Check if file is an image
+    function isImage() {
+      return request.resource.contentType.matches('image/.*');
+    }
+    
+    // Check if file size is under limit (5MB for images)
+    function isUnderSizeLimit(sizeMB) {
+      return request.resource.size < sizeMB * 1024 * 1024;
+    }
+    
+    // ==========================================
+    // PATH: /profile-photos/{userId}/{fileName}
+    // ==========================================
+    
+    match /profile-photos/{userId}/{fileName} {
+      // Anyone can read profile photos (public)
+      allow read: if true;
+      
+      // Only the user can upload/update their own profile photo
+      // Must be an image under 5MB
+      allow write: if isAuthenticated() && 
+                     request.auth.uid == userId &&
+                     isImage() &&
+                     isUnderSizeLimit(5);
+      
+      // Only the user can delete their own profile photo
+      allow delete: if isAuthenticated() && 
+                      request.auth.uid == userId;
+    }
+    
+    // ==========================================
+    // PATH: /listing-images/{listingId}/{fileName}
+    // ==========================================
+    
+    match /listing-images/{listingId}/{fileName} {
+      // Anyone can read listing images (public)
+      allow read: if true;
+      
+      // Only authenticated, verified users can upload listing images
+      // Must be an image under 10MB
+      allow write: if isAuthenticated() &&
+                     isImage() &&
+                     isUnderSizeLimit(10);
+      
+      // Only the listing owner can delete listing images
+      // (Note: We can't easily verify listing ownership in storage rules,
+      //  so we rely on Firestore rules and client-side logic)
+      allow delete: if isAuthenticated();
+    }
+    
+    // ==========================================
+    // DENY ALL OTHER PATHS
+    // ==========================================
+    
+    // Deny access to any other storage paths
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
+

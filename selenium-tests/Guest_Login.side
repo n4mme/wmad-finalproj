@@ -1,0 +1,82 @@
+{
+  "id": "guest-login-test",
+  "version": "2.0",
+  "name": "Guest Login",
+  "url": "http://localhost:3000",
+  "tests": [{
+    "id": "guest-login-flow",
+    "name": "Guest Login Flow",
+    "commands": [{
+      "id": "open-homepage",
+      "comment": "Open the homepage",
+      "command": "open",
+      "target": "/",
+      "targets": [],
+      "value": ""
+    }, {
+      "id": "set-window-size",
+      "comment": "Set browser window size",
+      "command": "setWindowSize",
+      "target": "1065x800",
+      "targets": [],
+      "value": ""
+    }, {
+      "id": "click-login-button",
+      "comment": "Click Login button on landing page",
+      "command": "click",
+      "target": "css=[data-testid=\"landing-login-button\"]",
+      "targets": [
+        ["css=[data-testid=\"landing-login-button\"]", "css:finder"],
+        ["xpath=//button[@data-testid='landing-login-button']", "xpath:attributes"],
+        ["xpath=//button[contains(.,'Login')]", "xpath:innerText"]
+      ],
+      "value": ""
+    }, {
+      "id": "wait-for-login-form",
+      "comment": "Wait for login form to be visible",
+      "command": "waitForElementVisible",
+      "target": "css=[data-testid=\"login-form\"]",
+      "targets": [],
+      "value": "5000"
+    }, {
+      "id": "type-email",
+      "comment": "Type email address",
+      "command": "type",
+      "target": "css=[data-testid=\"login-email-input\"]",
+      "targets": [
+        ["css=[data-testid=\"login-email-input\"]", "css:finder"],
+        ["xpath=//input[@data-testid='login-email-input']", "xpath:attributes"]
+      ],
+      "value": "guest@example.com"
+    }, {
+      "id": "type-password",
+      "comment": "Type password",
+      "command": "type",
+      "target": "css=[data-testid=\"login-password-input\"]",
+      "targets": [
+        ["css=[data-testid=\"login-password-input\"]", "css:finder"],
+        ["xpath=//input[@data-testid='login-password-input']", "xpath:attributes"]
+      ],
+      "value": "password123"
+    }, {
+      "id": "click-submit",
+      "comment": "Click Sign In button",
+      "command": "click",
+      "target": "css=[data-testid=\"login-submit-button\"]",
+      "targets": [
+        ["css=[data-testid=\"login-submit-button\"]", "css:finder"],
+        ["xpath=//button[@data-testid='login-submit-button']", "xpath:attributes"],
+        ["xpath=//button[contains(.,'Sign In')]", "xpath:innerText"]
+      ],
+      "value": ""
+    }, {
+      "id": "wait-for-dashboard",
+      "comment": "Wait for dashboard to load (check for profile menu)",
+      "command": "waitForElementVisible",
+      "target": "css=[data-testid=\"header-menu-profile\"]",
+      "targets": [],
+      "value": "10000"
+    }]
+  }]
+}
+

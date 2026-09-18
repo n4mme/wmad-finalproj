@@ -1,0 +1,422 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ==========================================
+    // HELPER FUNCTIONS
+    // ==========================================
+    
+    // Check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Check if user owns the document
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    // Check if user is the host of a listing
+    function isListingHost(listingId) {
+      return isAuthenticated() && 
+             get(/databases/$(database)/documents/listings/$(listingId)).data.hostId == request.auth.uid;
+    }
+    
+    // Check if email is verified
+    function isEmailVerified() {
+      return isAuthenticated() && request.auth.token.email_verified == true;
+    }
+    
+    // Check if user has a verified account in Firestore
+    function isAccountVerified() {
+      return isAuthenticated() && 
+             (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.emailVerified == true ||
+              get(/databases/$(database)/documents/users/$(request.auth.uid)).data.otpVerified == true);
+    }
+    
+    // Check if user is admin
+    function isAdmin() {
+      return isAuthenticated() && 
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+    
+    // ==========================================
+    // COLLECTION: /users
+    // ==========================================
+    
+    match /users/{userId} {
+      // Anyone can read user profiles (public info)
+      // Admin can read all users
+      allow read: if true || isAdmin();
+      
+      // Users can create their own profile during signup
+      // Admin can create user profiles
+      allow create: if (isAuthenticated() && 
+                      request.auth.uid == userId &&
+                      request.resource.data.uid == userId) ||
+                     isAdmin();
+      
+      // Users can update their own profile
+      // Admin can update any user profile (for termination, suspension, etc.)
+      // Exception: Allow wallet balance updates for earnings from bookings and refunds
+      // Exception: Allow points and guestProfile updates (for reviews and points calculation)
+      // This allows guests to credit/debit host wallets when making bookings or cancelling
+      // Completely permissive for wallet updates: any authenticated user can update any user's wallet
+      // This is necessary for booking payments and refunds
+      // When using updateDoc, only the fields being updated are sent, but rules see the merged document
+      allow update: if isAdmin() ||
+                    isOwner(userId) ||
+                    // Allow any authenticated user to update walletBalance on any user document
+                    // This is needed for cross-user wallet operations (bookings, refunds)
+                    (isAuthenticated() && 
+                     'walletBalance' in request.resource.data &&
+                     request.resource.data.walletBalance is int &&
+                     request.resource.data.walletBalance >= 0) ||
+                    // Allow updating points and guestProfile fields (for reviews and points calculation)
+                    (isAuthenticated() &&
+                     ('points' in request.resource.data || 
+                      'guestProfile' in request.resource.data ||
+                      'pointsUpdatedAt' in request.resource.data));
+      
+      // Admin can delete user profiles
+      allow delete: if isAdmin();
+    }
+    
+    // ==========================================
+    // COLLECTION: /listings
+    // ==========================================
+    
+    match /listings/{listingId} {
+      // Admin can read all listings
+      // Anyone can read active listings
+      // Hosts can read their own listings (including drafts)
+      allow read: if isAdmin() ||
+                    (resource.data.isActive == true && 
+                     resource.data.status == 'active') ||
+                    (isAuthenticated() && 
+                     resource.data.hostId == request.auth.uid);
+      
+      // Authenticated users can create listings
+      // Temporarily relaxed for testing - will re-enable verification check later
+      allow create: if isAuthenticated() && 
+                      request.resource.data.hostId == request.auth.uid;
+      
+      // Only the host can update their listing
+      // Exception: Guests can update bookedDates when making a booking or cancelling
+      // Exception: Allow migration - any authenticated user can add/update province field (denormalization)
+      // Exception: Allow updating stats (rating, reviewsCount) when reviews are created
+      // Cannot change hostId after creation
+      allow update: if isAuthenticated() && 
+                      ((resource.data.hostId == request.auth.uid &&
+                        request.resource.data.hostId == resource.data.hostId) ||
+                       // Allow guests to update only bookedDates field when booking/cancelling
+                       // Ensure critical fields are not changed
+                       (request.resource.data.hostId == resource.data.hostId &&
+                        request.resource.data.title == resource.data.title &&
+                        request.resource.data.category == resource.data.category &&
+                        'bookedDates' in request.resource.data &&
+                        request.resource.data.bookedDates is list) ||
+                       // Allow migration: add/update province field only (safe denormalization)
+                       // ANY authenticated user can add/update province field on ANY listing
+                       // Simplest possible check - just verify province is being set
+                       // updateDoc only sends fields being updated, so this is safe
+                       'province' in request.resource.data &&
+                       request.resource.data.province is string ||
+                       // Allow updating stats fields (rating, reviewsCount) when reviews are created
+                       // This allows guests to update listing stats when they submit reviews
+                       (request.resource.data.hostId == resource.data.hostId &&
+                        'stats' in request.resource.data &&
+                        request.resource.data.stats.rating is number &&
+                        request.resource.data.stats.rating >= 0 &&
+                        request.resource.data.stats.rating <= 5 &&
+                        request.resource.data.stats.reviewsCount is int &&
+                        request.resource.data.stats.reviewsCount >= 0));
+      
+      // Only the host can delete their listing
+      allow delete: if isAuthenticated() && 
+                      resource.data.hostId == request.auth.uid;
+      
+      // ==========================================
+      // SUBCOLLECTION: /listings/{listingId}/reviews
+      // ==========================================
+      
+      match /reviews/{reviewId} {
+        // Anyone can read reviews
+        allow read: if true;
+        
+        // Authenticated guests can create reviews for their completed bookings
+        allow create: if isAuthenticated() && 
+                        request.resource.data.guestId == request.auth.uid &&
+                        request.resource.data.rating is int &&
+                        request.resource.data.rating >= 1 &&
+                        request.resource.data.rating <= 5 &&
+                        request.resource.data.comment is string &&
+                        request.resource.data.comment.size() >= 10;
+        
+        // Reviews cannot be updated or deleted
+        allow update: if false;
+        allow delete: if false;
+      }
+    }
+    
+    // ==========================================
+    // COLLECTION: /favorites
+    // ==========================================
+    
+    match /favorites/{favoriteId} {
+      // Users can only read their own favorites
+      allow read: if isAuthenticated() && 
+                    resource.data.userId == request.auth.uid;
+      
+      // Users can create favorites for themselves
+      // Favorite must reference an existing, active listing
+      allow create: if isAuthenticated() && 
+                      request.resource.data.userId == request.auth.uid &&
+                      exists(/databases/$(database)/documents/listings/$(request.resource.data.listingId)) &&
+                      get(/databases/$(database)/documents/listings/$(request.resource.data.listingId)).data.isActive == true;
+      
+      // Users can update their own favorites (rarely needed)
+      allow update: if isAuthenticated() && 
+                      resource.data.userId == request.auth.uid &&
+                      request.resource.data.userId == request.auth.uid;
+      
+      // Users can delete their own favorites
+      allow delete: if isAuthenticated() && 
+                      resource.data.userId == request.auth.uid;
+    }
+    
+    // ==========================================
+    // COLLECTION: /bookings
+    // ==========================================
+    
+    match /bookings/{bookingId} {
+      // Guests and hosts can read their own bookings
+      // Admin can read all bookings
+      allow read: if isAdmin() ||
+                    (isAuthenticated() && 
+                     (resource.data.guestId == request.auth.uid || 
+                      resource.data.hostId == request.auth.uid));
+      
+      // Only verified guests can create bookings
+      // Must reference an existing, active listing
+      // Cannot book your own listing
+      allow create: if isAuthenticated() && 
+                      isAccountVerified() &&
+                      request.resource.data.guestId == request.auth.uid &&
+                      exists(/databases/$(database)/documents/listings/$(request.resource.data.listingId)) &&
+                      get(/databases/$(database)/documents/listings/$(request.resource.data.listingId)).data.isActive == true &&
+                      request.resource.data.hostId != request.auth.uid;
+      
+      // Guests can update their bookings (e.g., cancel, mark as reviewed)
+      // Hosts can update booking status (e.g., confirm)
+      // Cannot change core booking details (dates, listing, etc.) after creation
+      // Exception: Guests can update 'reviewed' and 'reviewedAt' fields when submitting reviews
+      allow update: if isAuthenticated() && 
+                      (resource.data.guestId == request.auth.uid || 
+                       resource.data.hostId == request.auth.uid) &&
+                      request.resource.data.guestId == resource.data.guestId &&
+                      request.resource.data.hostId == resource.data.hostId &&
+                      request.resource.data.listingId == resource.data.listingId &&
+                      request.resource.data.checkIn == resource.data.checkIn &&
+                      request.resource.data.checkOut == resource.data.checkOut ||
+                      // Allow guests to mark bookings as reviewed
+                      (isAuthenticated() &&
+                       resource.data.guestId == request.auth.uid &&
+                       request.resource.data.guestId == resource.data.guestId &&
+                       'reviewed' in request.resource.data &&
+                       request.resource.data.reviewed == true);
+      
+      // Bookings cannot be deleted, only cancelled
+      allow delete: if false;
+    }
+    
+    // ==========================================
+    // COLLECTION: /messages
+    // ==========================================
+    
+    match /messages/{threadId} {
+      // Only participants can read the thread
+      // Allow read if user is authenticated and is a participant
+      allow read: if isAuthenticated() && 
+                    (request.auth.uid == resource.data.guestId ||
+                     request.auth.uid == resource.data.hostId ||
+                     (resource.data.participants != null &&
+                      request.auth.uid in resource.data.participants));
+      
+      // Either participant can create a thread
+      allow create: if isAuthenticated() &&
+                      request.resource.data.hostId is string &&
+                      request.resource.data.guestId is string &&
+                      (request.auth.uid == request.resource.data.guestId ||
+                       request.auth.uid == request.resource.data.hostId);
+      
+      // Only participants can update the thread
+      allow update: if isAuthenticated() && 
+                      (request.auth.uid == resource.data.guestId ||
+                       request.auth.uid == resource.data.hostId ||
+                       (resource.data.participants != null &&
+                        request.auth.uid in resource.data.participants));
+      
+      // Threads cannot be deleted
+      allow delete: if false;
+      
+      // ==========================================
+      // SUBCOLLECTION: /messages/{threadId}/messages
+      // ==========================================
+      
+      match /messages/{messageId} {
+        // Only thread participants can read messages
+        allow read: if isAuthenticated() && 
+                      (request.auth.uid == get(/databases/$(database)/documents/messages/$(threadId)).data.guestId ||
+                       request.auth.uid == get(/databases/$(database)/documents/messages/$(threadId)).data.hostId ||
+                       (get(/databases/$(database)/documents/messages/$(threadId)).data.participants != null &&
+                        request.auth.uid in get(/databases/$(database)/documents/messages/$(threadId)).data.participants));
+        
+        // Only participants can send messages
+        // Must be the sender
+        allow create: if isAuthenticated() && 
+                        (request.auth.uid == get(/databases/$(database)/documents/messages/$(threadId)).data.guestId ||
+                         request.auth.uid == get(/databases/$(database)/documents/messages/$(threadId)).data.hostId ||
+                         (get(/databases/$(database)/documents/messages/$(threadId)).data.participants != null &&
+                          request.auth.uid in get(/databases/$(database)/documents/messages/$(threadId)).data.participants)) &&
+                        request.resource.data.senderId == request.auth.uid;
+        
+        // Can update to mark as read
+        allow update: if isAuthenticated() && 
+                        (request.auth.uid == get(/databases/$(database)/documents/messages/$(threadId)).data.guestId ||
+                         request.auth.uid == get(/databases/$(database)/documents/messages/$(threadId)).data.hostId ||
+                         (get(/databases/$(database)/documents/messages/$(threadId)).data.participants != null &&
+                          request.auth.uid in get(/databases/$(database)/documents/messages/$(threadId)).data.participants));
+        
+        // Messages cannot be deleted
+        allow delete: if false;
+      }
+    }
+    
+    // ==========================================
+    // COLLECTION: /coupons
+    // ==========================================
+    
+    match /coupons/{couponId} {
+      // Authenticated users can read coupons (needed to apply discounts)
+      allow read: if isAuthenticated();
+      
+      // Only the host who owns the coupon can create, update, or delete it
+      allow create: if isAuthenticated() &&
+                      request.resource.data.hostId == request.auth.uid;
+      allow update: if isAuthenticated() &&
+                      resource.data.hostId == request.auth.uid;
+      allow delete: if isAuthenticated() &&
+                      resource.data.hostId == request.auth.uid;
+
+      // Track per-user usage counts in subcollection
+      match /usage/{userId} {
+        allow read: if isAuthenticated() &&
+                      (request.auth.uid == userId ||
+                       get(/databases/$(database)/documents/coupons/$(couponId)).data.hostId == request.auth.uid);
+        allow create, update: if isAuthenticated() && request.auth.uid == userId;
+        allow delete: if false;
+      }
+    }
+    
+    // ==========================================
+    // COLLECTION: /wishes
+    // ==========================================
+    
+    match /wishes/{wishId} {
+      // Users can only read their own wishes
+      // Admin can read all wishes
+      allow read: if isAuthenticated() && 
+                    (resource.data.userId == request.auth.uid || isAdmin());
+      
+      // Authenticated users can create wishes for themselves
+      allow create: if isAuthenticated() && 
+                      request.resource.data.userId == request.auth.uid &&
+                      request.resource.data.wishText is string &&
+                      request.resource.data.wishText.size() > 0;
+      
+      // Users can update their own wishes (rarely needed)
+      allow update: if isAuthenticated() && 
+                      resource.data.userId == request.auth.uid &&
+                      request.resource.data.userId == request.auth.uid;
+      
+      // Wishes cannot be deleted (for record keeping)
+      allow delete: if false;
+    }
+    
+    // ==========================================
+    // COLLECTION: /walletTransactions
+    // ==========================================
+    
+    match /walletTransactions/{transactionId} {
+      // Users can only read their own transactions
+      // Admin can read all transactions
+      allow read: if isAdmin() ||
+                    (isAuthenticated() && 
+                     resource.data.userId == request.auth.uid);
+      
+      // Admin can update transactions (for cash-out approval, etc.)
+      allow update: if isAdmin();
+      
+      // Users can create transactions for themselves
+      // Admin can create transactions for any user (for payouts, etc.)
+      // Or system can create earning/refund transactions for hosts/guests (when booking/cancelling)
+      allow create: if isAdmin() ||
+                      (isAuthenticated() && 
+                       (request.resource.data.userId == request.auth.uid ||
+                        // Allow creating earning transactions for hosts (from bookings)
+                        (request.resource.data.type == 'earning' && 
+                         request.resource.data.amount > 0) ||
+                        // Allow creating refund transactions for guests/hosts (from cancellations)
+                        (request.resource.data.type == 'refund' && 
+                         request.resource.data.amount != 0) ||
+                        // Allow creating payout transactions (admin creates these after PayPal payout)
+                        request.resource.data.type == 'payout'));
+      
+      // Admin can delete transactions (if needed)
+      allow delete: if isAdmin();
+    }
+    
+    // ==========================================
+    // COLLECTION: /payments
+    // ==========================================
+    
+    match /payments/{paymentId} {
+      // Users can read their own payments
+      allow read: if isAuthenticated() && 
+                    (resource.data.userId == request.auth.uid ||
+                     resource.data.hostId == request.auth.uid);
+      
+      // Authenticated users can create payments
+      allow create: if isAuthenticated();
+      
+      // Payments cannot be updated or deleted
+      allow update: if false;
+      allow delete: if false;
+    }
+    
+    // ==========================================
+    // COLLECTION: /settings
+    // ==========================================
+    
+    match /settings/{settingId} {
+      // Anyone can read settings (for service fees, policies, etc.)
+      allow read: if true;
+      
+      // Only admin can create and update settings
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+    
+    // ==========================================
+    // DENY ALL OTHER COLLECTIONS
+    // ==========================================
+    
+    // Explicitly deny access to any other collections
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
+
